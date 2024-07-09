@@ -68,11 +68,18 @@ if __name__ == '__main__':
     def add_routers(network, router_buses):
         for bus in router_buses:
             try:
-                network.add("Generator", f"Router at Bus {bus}",
-                            bus=str(bus),
-                            control="PV",
-                            p_nom=100,
-                            v_nom=1.0)
+                # network.add("Generator", f"Router at Bus {bus}",
+                #             bus=str(bus),
+                #             control="PV",
+                #             p_nom=100,
+                #             v_nom=1.0)
+                # Set voltage (in per unit)
+                network.buses.at[f"{bus}", "v_mag_pu_set"] = 1.00  # 1.00 p.u.
+
+                # Set reactive power (in MW)
+                # network.buses.at[f"{bus}", "q_set"] = 0  # 0 MVAr
+                network.buses.at[f"{bus}", "control"] = "PV"  # For voltage control
+
             except:
                 print(f"Router at Bus {bus} already exists")
 
@@ -191,9 +198,9 @@ if __name__ == '__main__':
     # Print results
     print(f"Optimal router locations: {best_router_locations}")
     print("\nRouter capacities (in MVA):")
-    for bus in best_router_locations:
-        capacity = abs(network.generators_t.p.loc["now", f"Router at Bus {bus}"] +
-                       1j * network.generators_t.q.loc["now", f"Router at Bus {bus}"])
-        print(f"Bus {bus}: {capacity:.4f}")
+    # for bus in best_router_locations:
+    #     capacity = abs(network.generators_t.p.loc["now", f"Router at Bus {bus}"] +
+    #                    1j * network.generators_t.q.loc["now", f"Router at Bus {bus}"])
+    #     print(f"Bus {bus}: {capacity:.4f}")
 
     print("\nVoltage deviation: {:.4f}".format(calculate_voltage_deviation(network)))
