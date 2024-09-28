@@ -36,20 +36,20 @@ def add_upfc_like_energy_router(net, from_bus, to_bus):
                                           pfe_kw=0, i0_percent=0, shift_degree=0,
                                           vkr_percent=0.1, vk_percent=10)
     
-    # Add a shunt element (reactor or capacitor) at the target bus for voltage control
-    pp.create_shunt(net, bus=to_bus, q_mvar=0, p_mw=0, vn_kv=12.66)
+    # Add a static generator at the target bus for voltage control
+    pp.create_sgen(net, bus=to_bus, p_mw=0, q_mvar=0, name="Energy Router", controllable=True)
     
     return to_bus
 
 def adjust_energy_router(net, router_bus, target_voltage=1.0):
-    # Get transformer and shunt indices
+    # Get transformer and static generator indices
     trafo_idx = net.trafo.index[net.trafo.lv_bus == router_bus][0]
-    shunt_idx = net.shunt.index[net.shunt.bus == router_bus][0]
+    sgen_idx = net.sgen.index[net.sgen.bus == router_bus][0]
     
-    # Adjust shunt (reactive power) for voltage control
+    # Adjust static generator (reactive power) for voltage control
     v_pu = net.res_bus.loc[router_bus, 'vm_pu']
     q_mvar_adjust = 2 * (target_voltage - v_pu)  # Simple proportional control
-    net.shunt.loc[shunt_idx, 'q_mvar'] += q_mvar_adjust
+    net.sgen.loc[sgen_idx, 'q_mvar'] += q_mvar_adjust
     
     # Adjust transformer phase shift for power flow control (if needed)
     p_mw = net.res_bus.loc[router_bus, 'p_mw']
