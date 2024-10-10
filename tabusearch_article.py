@@ -1,10 +1,10 @@
 import pandapower as pp
-import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
-import random
+import matplotlib.pyplot as plt
+import pandas as pd
+import copy
 
-# Create IEEE 33-bus network
+# Step 1: Create the IEEE 33-bus network
 def create_33bus_network():
     net = pp.create_empty_network()
 
@@ -15,8 +15,10 @@ def create_33bus_network():
     # Add external grid
     pp.create_ext_grid(net, bus=0, vm_pu=1.0)
 
-    # Add lines and loads (simplified for now)
+    # Load IEEE 33-bus data from file (assuming data is in 'ieee33bus.txt')
     df = pd.read_csv('ieee33bus.txt', sep=' ', header=None, names=['from', 'to', 'P', 'Q', 'R', 'X', 'C'])
+    
+    # Add lines and loads
     for _, row in df.iterrows():
         from_bus = int(row['from']) - 1
         to_bus = int(row['to']) - 1
@@ -28,21 +30,20 @@ def create_33bus_network():
     
     return net
 
-# Cost functions based on the article for energy router and DG
+# Step 2: Define the cost functions based on the article
 def calculate_tic(router_size_mva, dg_size_mw):
     # Router cost as a function of size (MVA)
     F1_router = 0.0003
     F2_router = -0.185
-    F3_router = 158  # Base cost
+    F3_router = 158
     router_cost = F1_router * router_size_mva**2 + F2_router * router_size_mva + F3_router
 
     # DG cost as a function of size (MW)
-    alpha_dg = 500  # Simplified per MW
+    alpha_dg = 500  # Cost per MW
     dg_cost = alpha_dg * dg_size_mw
 
     return router_cost + dg_cost
 
-# Corrected TGC calculation
 def calculate_tgc(power_losses, active_generation, reactive_generation):
     # Power losses cost (using example values for price per kWh)
     loss_cost_per_kwh = 0.1  # USD/kWh
@@ -58,30 +59,41 @@ def calculate_tgc(power_losses, active_generation, reactive_generation):
 
     return plc + pgc + qgc
 
-# Add DG units only (Strategy 1)
+# Step 3: Add devices according to each strategy
 def add_dg_units(net):
-    # Example function to add DG to bus and optimize its size
-    dg_size = 5  # Example size
+    dg_size = 5  # Example size in MW
     pp.create_sgen(net, bus=30, p_mw=dg_size, name="DG Unit")
     return dg_size
 
-# Add energy routers only (Strategy 2)
 def add_energy_router(net, from_bus, to_bus):
-    # Example UPFC-like energy router
+    router_size_mva = 10  # Example size in MVA
     pp.create_transformer_from_parameters(net, hv_bus=from_bus, lv_bus=to_bus, 
-                                          sn_mva=10, vn_hv_kv=12.66, vn_lv_kv=12.66,
+                                          sn_mva=router_size_mva, vn_hv_kv=12.66, vn_lv_kv=12.66,
                                           vsc_percent=10, vscr_percent=0.1, 
                                           pfe_kw=0, i0_percent=0, shift_degree=0,
                                           vkr_percent=0.1, vk_percent=10)
-    return 10  # Example router size (MVA)
+    return router_size_mva
 
-# Combined strategy with DGs and routers (Strategy 3)
 def add_combined_strategy(net):
     dg_size = add_dg_units(net)
     router_size = add_energy_router(net, 18, 19)
     return dg_size, router_size
 
-# Evaluate the solution: Run power flow and calculate costs
+# Step 4: Optimize using Tabu search for each strategy
+def generate_candidates(net, strategy="Combined"):
+    candidates = []
+    for i in range(1, 32):
+        net_copy = copy.deepcopy(net)
+        if strategy == "Router":
+            add_energy_router(net_copy, i, i+1)
+        elif strategy == "DG":
+            pp.create_sgen(net_copy, bus=i, p_mw=5)  # Example DG
+        elif strategy == "Combined":
+            add_energy_router(net_copy, i, i+1)
+            pp.create_sgen(net_copy, bus=i, p_mw=5)
+        candidates.append(net_copy)
+    return candidates
+
 def evaluate_solution(net, dg_size=5, router_size_mva=10):
     pp.runpp(net)
     # Get system power losses, active and reactive generation
@@ -93,99 +105,71 @@ def evaluate_solution(net, dg_size=5, router_size_mva=10):
     tgc = calculate_tgc(power_losses, active_generation, reactive_generation)
     return tic, tgc
 
-# Plot Pareto Front for TIC vs TGC
-def plot_pareto_front(pareto_front):
-    tic_values = []
-    tgc_values = []
-    
-    for solution in pareto_front:
-        tic, tgc = solution  # Simplified since solution is (TIC, TGC) tuple
-        tic_values.append(tic)
-        tgc_values.append(tgc)
-    
+def update_pareto_front(pareto_front, candidates):
+    for candidate in candidates:
+        tic, tgc = evaluate_solution(candidate)
+        if is_non_dominated(tic, tgc, pareto_front):
+            pareto_front.append((tic, tgc))
+
+def is_non_dominated(tic, tgc, pareto_front):
+    for existing_tic, existing_tgc in pareto_front:
+        if existing_tic <= tic and existing_tgc <= tgc:
+            return False
+    return True
+
+def tabu_search(net, max_iter=10, strategy="Combined"):
+    pareto_front = []
+    tabu_list = []
+
+    for iteration in range(max_iter):
+        candidate_solutions = generate_candidates(net, strategy)
+        update_pareto_front(pareto_front, candidate_solutions)
+
+        if candidate_solutions:
+            tabu_list.append(candidate_solutions[0])
+
+        print(f"Iteration {iteration}: Pareto Front Length = {len(pareto_front)}")
+
+    return pareto_front
+
+# Step 5: Plot results
+def plot_pareto_front(pareto_front, title):
+    tic_values = [tic for tic, tgc in pareto_front]
+    tgc_values = [tgc for tic, tgc in pareto_front]
+
     plt.figure(figsize=(10, 6))
     plt.scatter(tic_values, tgc_values, color='b', label="Pareto Front")
-    plt.title("Pareto Front: Total Investment Cost (TIC) vs Total Generation Cost (TGC)")
+    plt.title(f"Pareto Front: {title}")
     plt.xlabel("Total Investment Cost (USD)")
     plt.ylabel("Total Generation Cost (USD/year)")
     plt.grid(True)
     plt.legend()
     plt.show()
 
-# Tabu search algorithm for comparing strategies
-def compare_strategies(net_before):
-    pareto_front_dg = []
-    pareto_front_router = []
-    pareto_front_combined = []
-
-    # Strategy 1: Only DG Units
-    net_dg = net_before.deepcopy()
-    dg_size = add_dg_units(net_dg)
-    tic_dg, tgc_dg = evaluate_solution(net_dg, dg_size=dg_size, router_size_mva=0)
-    pareto_front_dg.append((tic_dg, tgc_dg))
-
-    # Strategy 2: Only Energy Routers
-    net_router = net_before.deepcopy()
-    router_size = add_energy_router(net_router, 18, 19)
-    tic_router, tgc_router = evaluate_solution(net_router, dg_size=0, router_size_mva=router_size)
-    pareto_front_router.append((tic_router, tgc_router))
-
-    # Strategy 3: Combined DG and Routers
-    net_combined = net_before.deepcopy()
-    dg_size, router_size = add_combined_strategy(net_combined)
-    tic_combined, tgc_combined = evaluate_solution(net_combined, dg_size=dg_size, router_size_mva=router_size)
-    pareto_front_combined.append((tic_combined, tgc_combined))
-
-    return pareto_front_dg, pareto_front_router, pareto_front_combined
-
-# Create the network
-net_before = create_33bus_network()
-
-# Compare the three strategies
-pareto_front_dg, pareto_front_router, pareto_front_combined = compare_strategies(net_before)
-
-# Plot Pareto Fronts for each strategy
-plot_pareto_front(pareto_front_dg)
-plot_pareto_front(pareto_front_router)
-plot_pareto_front(pareto_front_combined)
-
-# Finalize and plot results for all strategies
-def plot_all_strategies(pareto_front_dg, pareto_front_router, pareto_front_combined):
+def plot_network_configuration(net, strategy_name):
     plt.figure(figsize=(12, 8))
-    
-    # Unpack TIC and TGC values for each strategy
-    tic_dg, tgc_dg = zip(*pareto_front_dg) if pareto_front_dg else ([], [])
-    tic_router, tgc_router = zip(*pareto_front_router) if pareto_front_router else ([], [])
-    tic_combined, tgc_combined = zip(*pareto_front_combined) if pareto_front_combined else ([], [])
-    
-    # Plot for DG Units
-    plt.scatter(tic_dg, tgc_dg, color='blue', label='DG Units Only', alpha=0.5)
-
-    # Plot for Energy Routers
-    plt.scatter(tic_router, tgc_router, color='green', label='Energy Routers Only', alpha=0.5)
-
-    # Plot for Combined Strategy
-    plt.scatter(tic_combined, tgc_combined, color='red', label='Combined Strategy', alpha=0.5)
-
-    # Add titles and labels
-    plt.title("Pareto Front Comparison for Different Strategies")
-    plt.xlabel("Total Investment Cost (TIC) - USD")
-    plt.ylabel("Total Generation Cost (TGC) - USD/year")
-    plt.grid(True)
-    plt.legend()
-    plt.tight_layout()
+    pp.plotting.simple_plot(net)
+    plt.title(f"Optimized Network Configuration: {strategy_name}")
     plt.show()
 
-# Execute the function to plot all strategies
-plot_all_strategies(pareto_front_dg, pareto_front_router, pareto_front_combined)
+# Main function to run all strategies and display outputs
+def main():
+    net = create_33bus_network()
 
-# Output detailed results for all strategies
-def output_strategy_results(pareto_front, strategy_name):
-    print(f"\nResults for {strategy_name}:")
-    for tic, tgc in pareto_front:
-        print(f"TIC: {tic:.2f}, TGC: {tgc:.2f}")
+    # Strategy 1: DG Units only
+    pareto_front_dg = tabu_search(net, strategy="DG")
+    plot_pareto_front(pareto_front_dg, "DG Units Only")
+    plot_network_configuration(net, "DG Units Only")
 
-# Output results for each strategy
-output_strategy_results(pareto_front_dg, "DG Units Only")
-output_strategy_results(pareto_front_router, "Energy Routers Only")
-output_strategy_results(pareto_front_combined, "Combined Strategy")
+    # Strategy 2: Energy Routers only
+    pareto_front_router = tabu_search(net, strategy="Router")
+    plot_pareto_front(pareto_front_router, "Energy Routers Only")
+    plot_network_configuration(net, "Energy Routers Only")
+
+    # Strategy 3: Combined Strategy
+    pareto_front_combined = tabu_search(net, strategy="Combined")
+    plot_pareto_front(pareto_front_combined, "Combined Strategy")
+    plot_network_configuration(net, "Combined Strategy")
+
+if __name__ == "__main__":
+    main()
