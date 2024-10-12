@@ -1,7 +1,8 @@
 import pandapower as pp
-import pandas as pd
-import matplotlib.pyplot as plt
 import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+import copy
 import random
 
 # Read IEEE 33-bus data
@@ -30,35 +31,6 @@ def create_33bus_network():
     
     return net
 
-# Cost functions based on the article for energy router and DG
-def calculate_tic(router_size_mva, dg_size_mw):
-    # Router cost as a function of size (MVA)
-    F1_router = 0.0003
-    F2_router = -0.185
-    F3_router = 158  # Base cost
-    router_cost = F1_router * router_size_mva**2 + F2_router * router_size_mva + F3_router
-
-    # DG cost as a function of size (MW)
-    alpha_dg = 500  # Simplified per MW
-    dg_cost = alpha_dg * dg_size_mw
-
-    return router_cost + dg_cost
-
-def calculate_tgc(power_losses, active_generation, reactive_generation):
-    # Power losses cost (using example values for price per kWh)
-    loss_cost_per_kwh = 0.1  # USD/kWh
-    plc = power_losses * loss_cost_per_kwh * 8760  # Annualized
-
-    # Active power generation cost
-    alpha_pg = 50  # USD/MWh (example cost)
-    pgc = active_generation * alpha_pg * 8760  # Annualized
-
-    # Reactive power generation cost (assumed lower than active power)
-    alpha_qg = 10  # USD/Mvarh
-    qgc = reactive_generation * alpha_qg * 8760  # Annualized
-
-    return plc + pgc + qgc
-
 # Add UPFC-like energy router between buses
 def add_upfc_like_energy_router(net, from_bus, to_bus):
     pp.create_transformer_from_parameters(net, hv_bus=from_bus, lv_bus=to_bus, 
@@ -86,164 +58,145 @@ def adjust_energy_router(net, router_bus, target_voltage=1.0):
         new_shift = net.trafo.loc[trafo_idx, 'shift_degree'] + shift_adjust
         net.trafo.loc[trafo_idx, 'shift_degree'] = np.clip(new_shift, -10, 10)
 
-# Run power flow and plot side by side comparison
-def run_pf_and_plot_side_by_side(net_before, net_after, title_before, title_after):
-    fig, ax = plt.subplots(1, 2, figsize=(16, 6))
+# Step 2: Define the cost functions
+def calculate_tic(router_size_mva, dg_size_mw):
+    F1_router = 0.0003
+    F2_router = -0.185
+    F3_router = 158
+    router_cost = F1_router * router_size_mva**2 + F2_router * router_size_mva + F3_router
+
+    alpha_dg = 500
+    dg_cost = alpha_dg * dg_size_mw
+
+    return router_cost + dg_cost
+
+def calculate_tgc(power_losses, active_generation, reactive_generation):
+    loss_cost_per_kwh = 0.1
+    plc = max(power_losses, 0) * loss_cost_per_kwh * 8760
+
+    alpha_pg = 50
+    pgc = max(active_generation, 0) * alpha_pg * 8760
+
+    alpha_qg = 10
+    qgc = max(reactive_generation, 0) * alpha_qg * 8760
+
+    return plc + pgc + qgc
+
+# Step 3: Add DG Units and Energy Routers for optimization
+def add_dg_units(net, bus_id, dg_size=5):
+    pp.create_sgen(net, bus=bus_id, p_mw=dg_size, name="DG Unit")
+    return dg_size
+
+# Step 4: Genetic Algorithm Optimization with Energy Routers
+def genetic_algorithm(net, population_size=20, generations=50):
+    mutation_prob = 0.1
+    crossover_prob = 0.8
+
+    population = []
+    for _ in range(population_size):
+        individual = {
+            'dg_location': np.random.randint(1, 32),
+            'dg_size': np.random.uniform(1, 10),
+            'router_from_bus': np.random.randint(1, 32),
+            'router_to_bus': np.random.randint(1, 32)
+        }
+        population.append(individual)
+
+    def evaluate_fitness(individual):
+        net_copy = copy.deepcopy(net)
+        add_dg_units(net_copy, individual['dg_location'], individual['dg_size'])
+        add_upfc_like_energy_router(net_copy, individual['router_from_bus'], individual['router_to_bus'])
+        pp.runpp(net_copy)
+        power_losses = net_copy.res_line['pl_mw'].sum()
+        active_generation = net_copy.res_bus['p_mw'].sum()
+        reactive_generation = net_copy.res_bus['q_mvar'].sum()
+
+        tic = calculate_tic(1, individual['dg_size'])  # router_size_mva is fixed at 1 in the provided function
+        tgc = calculate_tgc(power_losses, active_generation, reactive_generation)
+        fitness = tic + tgc  # Minimize total cost
+        return fitness
+
+    def select_parents(population, fitness_values):
+        return random.choices(population, weights=[1/f for f in fitness_values], k=2)
+
+    def crossover(parent1, parent2):
+        if np.random.rand() < crossover_prob:
+            cross_point = np.random.randint(1, 4)
+            child1, child2 = parent1.copy(), parent2.copy()
+            if cross_point == 1:
+                child1['dg_location'], child2['dg_location'] = parent2['dg_location'], parent1['dg_location']
+            elif cross_point == 2:
+                child1['dg_size'], child2['dg_size'] = parent2['dg_size'], parent1['dg_size']
+            elif cross_point == 3:
+                child1['router_from_bus'], child2['router_from_bus'] = parent2['router_from_bus'], parent1['router_from_bus']
+                child1['router_to_bus'], child2['router_to_bus'] = parent2['router_to_bus'], parent1['router_to_bus']
+            return child1, child2
+        return parent1, parent2
+
+    def mutate(individual):
+        if np.random.rand() < mutation_prob:
+            mutation_point = np.random.randint(0, 4)
+            if mutation_point == 0:
+                individual['dg_location'] = np.random.randint(1, 32)
+            elif mutation_point == 1:
+                individual['dg_size'] = np.random.uniform(1, 10)
+            elif mutation_point == 2:
+                individual['router_from_bus'] = np.random.randint(1, 32)
+            else:
+                individual['router_to_bus'] = np.random.randint(1, 32)
+        return individual
+
+    for generation in range(generations):
+        fitness_values = [evaluate_fitness(ind) for ind in population]
+        new_population = []
+        while len(new_population) < population_size:
+            parent1, parent2 = select_parents(population, fitness_values)
+            child1, child2 = crossover(parent1, parent2)
+            child1 = mutate(child1)
+            child2 = mutate(child2)
+            new_population.extend([child1, child2])
+        population = new_population[:population_size]
+        best_fitness = min(fitness_values)
+        print(f"Generation {generation}, Best Fitness: {best_fitness}")
+
+    best_individual = population[np.argmin(fitness_values)]
+    return best_individual
+
+# Step 5: Plot results
+def plot_network_configuration(net, strategy_name):
+    static_coords = {
+        0:(0, 30),1:(10, 30),3:(20, 30),5:(30, 30),8:(40, 30),11:(50, 30),14:(60, 30),16:(70, 30),18:(80, 30),20:(90, 30),22:(100, 30),24:(110, 30),26:(120, 30),28:(130, 30),29:(140, 30),30:(150, 30),31:(160, 30),32:(170, 30),2:(10, 60),4:(20, 60),7:(30, 60),10:(40, 60),13:(60, 80),15:(70, 80),17:(80, 80),19:(90, 80),21:(100, 80),23:(110, 80),25:(120, 80),27:(130, 80),6:(20, 0),9:(30, 80),12:(40, 80)
+    }
+
+    for i in range(len(net.bus)):
+        net.bus_geodata.loc[i, 'x'] = static_coords.get(i, (0, 0))[0]
+        net.bus_geodata.loc[i, 'y'] = static_coords.get(i, (0, 0))[1]
+
+    plt.figure(figsize=(12, 8))
+    pp.plotting.simple_plot(net, show_plot=False)
     
-    bus_voltages_before = net_before.res_bus.vm_pu
-    ax[0].plot(range(1, len(bus_voltages_before) + 1), bus_voltages_before, 'bo-')
-    ax[0].set_title(title_before)
-    ax[0].set_xlabel('Bus Number')
-    ax[0].set_ylabel('Voltage (p.u.)')
-    ax[0].grid(True)
-    ax[0].set_ylim(0.9, 1.05)
+    for i, row in net.bus_geodata.iterrows():
+        plt.text(row['x'], row['y'], f"Bus {i+1}", fontsize=9, color='blue')
+        if i in net.sgen.index:
+            plt.scatter(row['x'], row['y'], color='green', label='DG' if i == 0 else "")
+        if i in net.trafo.index:
+            plt.scatter(row['x'], row['y'], color='red', label='Energy Router' if i == 0 else "")
     
-    bus_voltages_after = net_after.res_bus.vm_pu
-    ax[1].plot(range(1, len(bus_voltages_after) + 1), bus_voltages_after, 'ro-')
-    ax[1].set_title(title_after)
-    ax[1].set_xlabel('Bus Number')
-    ax[1].grid(True)
-    ax[1].set_ylim(0.9, 1.05)
-    
-    plt.tight_layout()
+    plt.legend(loc="upper right")
+    plt.title(f"Optimized Network Configuration: {strategy_name}")
     plt.show()
 
-# Generate candidate solutions by moving energy router to other bus locations
-def generate_candidates(net):
-    candidates = []
-    for i in range(1, 32):
-        net_copy = net.deepcopy()
-        add_upfc_like_energy_router(net_copy, i, i+1)
-        candidates.append(net_copy)
-    return candidates
+# Main function to run optimization and display results
+def main():
+    net = create_33bus_network()
 
-# Evaluate the solution: Run power flow and calculate costs
-def evaluate_solution(net):
-    pp.runpp(net)
-    # Get system power losses, active and reactive generation
-    power_losses = net.res_line['pl_mw'].sum()
-    active_generation = net.res_bus['p_mw'].sum()
-    reactive_generation = net.res_bus['q_mvar'].sum()
+    best_solution = genetic_algorithm(net)
+    print(f"Best Solution: {best_solution}")
 
-    # Assume router and DG sizes (example)
-    router_size_mva = 10  # MVA
-    dg_size_mw = 5  # MW
-    
-    tic = calculate_tic(router_size_mva, dg_size_mw)
-    tgc = calculate_tgc(power_losses, active_generation, reactive_generation)
-    return tic, tgc
+    add_dg_units(net, best_solution['dg_location'], best_solution['dg_size'])
+    add_upfc_like_energy_router(net, best_solution['router_from_bus'], best_solution['router_to_bus'])
 
-# Update the Pareto front with non-dominated solutions
-def update_pareto_front(pareto_front, candidates):
-    for candidate in candidates:
-        tic, tgc = evaluate_solution(candidate)
-        if is_non_dominated(candidate, pareto_front):
-            pareto_front.append(candidate)
+    plot_network_configuration(net, "GA Optimized Network")
 
-# Check if a solution is non-dominated
-def is_non_dominated(candidate, pareto_front):
-    candidate_tic, candidate_tgc = evaluate_solution(candidate)
-    for solution in pareto_front:
-        tic, tgc = evaluate_solution(solution)
-        if tic <= candidate_tic and tgc <= candidate_tgc:
-            return False
-    return True
-
-# Tabu search algorithm
-def tabu_search(net, max_iter=100):
-    best_solution = None
-    tabu_list = []
-    pareto_front = []
-
-    for iteration in range(max_iter):
-        # Generate candidate solutions by placing the energy router in different locations
-        candidate_solutions = generate_candidates(net)
-
-        # Evaluate and update the Pareto front
-        update_pareto_front(pareto_front, candidate_solutions)
-
-        # Add the best solution to the Tabu list (first solution for simplicity)
-        if candidate_solutions:
-            best_solution = candidate_solutions[0]
-            tabu_list.append(best_solution)
-
-        print(f"Iteration {iteration}: Pareto Front Length = {len(pareto_front)}")
-
-    return pareto_front
-
-# Create the network
-net_before = create_33bus_network()
-
-# Run initial power flow
-pp.runpp(net_before)
-
-# Add UPFC-like energy router between bus 18 (index 17) and bus 19 (index 18)
-net_after = net_before.deepcopy()  # Copy the network for comparison
-router_bus = add_upfc_like_energy_router(net_after, 17, 18)
-
-# Run power flow and adjust energy router
-max_iterations = 20
-for i in range(max_iterations):
-    pp.runpp(net_after)
-    adjust_energy_router(net_after, router_bus)
-    
-    if abs(1.0 - net_after.res_bus.loc[router_bus, 'vm_pu']) < 0.001:
-        print(f"Converged after {i+1} iterations")
-        break
-else:
-    print("Did not converge within maximum iterations")
-
-# Run final power flow with UPFC-like energy router
-pp.runpp(net_after)
-
-# Plot voltage profile before and after the router is added
-run_pf_and_plot_side_by_side(net_before, net_after, 
-                             "IEEE 33-bus Test Case - Initial",
-                             "IEEE 33-bus Test Case - With Energy Router")
-
-# Run Tabu search to optimize energy router placement
-pareto_front = tabu_search(net_after)
-
-# Plot Pareto Front for TIC vs TGC
-def plot_pareto_front(pareto_front):
-    tic_values = []
-    tgc_values = []
-    
-    for solution in pareto_front:
-        tic, tgc = evaluate_solution(solution)
-        tic_values.append(tic)
-        tgc_values.append(tgc)
-    
-    plt.figure(figsize=(10, 6))
-    plt.scatter(tic_values, tgc_values, color='b', label="Pareto Front")
-    plt.title("Pareto Front: Total Investment Cost (TIC) vs Total Generation Cost (TGC)")
-    plt.xlabel("Total Investment Cost (USD)")
-    plt.ylabel("Total Generation Cost (USD/year)")
-    plt.grid(True)
-    plt.legend()
-    plt.show()
-
-# Plot the final Pareto Front
-plot_pareto_front(pareto_front)
-
-# Detailed analysis of the changes made by the energy router
-def analyze_results(net_before, net_after):
-    voltage_changes = net_after.res_bus.vm_pu - net_before.res_bus.vm_pu
-    line_loading_changes = net_after.res_line['loading_percent'] - net_before.res_line['loading_percent']
-
-    print("\nVoltage Changes Due to Energy Router:")
-    for i, delta_v in enumerate(voltage_changes):
-        print(f"Bus {i+1}: Voltage change = {delta_v:.4f} p.u.")
-
-    print("\nLine Loading Changes Due to Energy Router:")
-    for i, delta_load in enumerate(line_loading_changes):
-        print(f"Line {i+1}: Loading change = {delta_load:.2f}%")
-
-# Perform detailed analysis of the results
-analyze_results(net_before, net_after)
-
-# Display the final Pareto Front values
-print("\nFinal Pareto Front Solutions:")
-for solution in pareto_front:
-    tic, tgc = evaluate_solution(solution)
-    print(f"TIC: {tic:.2f}, TGC: {tgc:.2f}")
+if __name__ == "__main__":
+    main()
