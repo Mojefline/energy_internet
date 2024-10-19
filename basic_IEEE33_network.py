@@ -2,6 +2,10 @@ import pandapower as pp
 import matplotlib.pyplot as plt
 import networkx as nx
 
+import pandapower.networks as pn
+
+net33 = pn.case33bw()
+
 def create_ieee33_network():
     # Create an empty network
     net = pp.create_empty_network()
@@ -74,10 +78,16 @@ def plot_network(net):
     plt.show()
 
 # Create the network
-net = create_ieee33_network()
+# net = create_ieee33_network()
+
+# # Plot the network
+# plot_network(net)
+
+# # Print some basic network information
+# print(net)
 
 # Plot the network
-plot_network(net)
+plot_network(net33)
 
 # Print some basic network information
-print(net)
+print(net33)
