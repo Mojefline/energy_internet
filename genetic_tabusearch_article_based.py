@@ -5,6 +5,11 @@ import matplotlib.pyplot as plt
 import copy
 import random
 
+min_dgs=0
+max_dgs=10
+min_routers=0
+max_routers=10
+
 # Create IEEE 33-bus network
 def create_33bus_network():
     net = pn.case33bw()
@@ -32,7 +37,7 @@ def adjust_energy_router(net, router_bus, target_voltage=1.0):
     trafo_idx = net.trafo.index[net.trafo.lv_bus == router_bus][0]
     sgen_idx = net.sgen.index[net.sgen.bus == router_bus][0]
     tolerance = 1e-3
-    max_iterations = 10
+    max_iterations = 50
     iteration = 0
     while iteration < max_iterations:
         v_pu = net.res_bus.loc[router_bus, 'vm_pu']
@@ -87,6 +92,8 @@ def genetic_algorithm(net, scenario, population_size=20, generations=5, target_v
 
     # Scenario settings: multiple DGs and/or multiple routers
     for _ in range(population_size):
+        num_dgs = np.random.randint(min_dgs, max_dgs+1)
+        num_routers = np.random.randint(min_routers, max_routers+1)
         individual = {
             'dg_locations': [np.random.randint(1, 32) for _ in range(num_dgs)],
             'dg_sizes': [np.random.uniform(1, 10) for _ in range(num_dgs)],
@@ -184,6 +191,11 @@ def plot_voltage_profiles(base_profile, profiles, labels):
 # Plot network configuration with DGs and Routers
 def plot_network_with_devices(net, dg_locations=None, router_locations=None, title="Network Configuration"):
     pp.plotting.simple_plot(net, show_plot=False)
+
+    # Add bus names
+    for bus_id in net.bus.index:
+        x, y = net.bus_geodata.loc[bus_id, ['x', 'y']]
+        plt.text(x, y, f'Bus {bus_id}', fontsize=8, ha='right')
 
     # Plot DG locations
     if dg_locations:
