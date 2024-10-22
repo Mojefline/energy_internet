@@ -7,9 +7,9 @@ import copy
 import random
 
 min_dgs=1
-max_dgs=10
+max_dgs=5
 min_routers=1
-max_routers=10
+max_routers=5
 
 # Create IEEE 33-bus network
 def create_33bus_network():
@@ -63,13 +63,13 @@ def add_dg_units(net, bus_ids, dg_sizes):
 
 # Cost functions (Total Investment Cost - TIC, Total Generation Cost - TGC)
 def calculate_tic(router_sizes_mva, dg_sizes_mw):
-    F_router = 750
-    router_cost = sum(F_router * router_sizes_mva)
+    F1_router = 0.0003
+    F2_router = -0.185
+    F3_router = 158
+    router_cost = sum([F1_router * size**2 + F2_router * size + F3_router for size in router_sizes_mva])
 
     alpha_dg = 500
-    dg_cost = 0
-    for size in dg_sizes_mw:
-        dg_cost +=alpha_dg * size
+    dg_cost = sum([alpha_dg * size for size in dg_sizes_mw])
 
     return router_cost + dg_cost
 
@@ -86,8 +86,41 @@ def calculate_tgc(power_losses, active_generation, reactive_generation):
     return plc + pgc + qgc
 
 # Genetic Algorithm Optimization
-def genetic_algorithm(net, scenario, population_size=20, generations=40, target_voltage=1.0):
-    mutation_prob = 0.3
+
+import collections
+
+# Tabu Search Optimization
+def tabu_search(net, scenario, tabu_size=10, iterations=50, target_voltage=1.0):
+    # Define parameters for Tabu Search
+    best_solution = None
+    best_fitness = float('inf')
+    tabu_list = collections.deque(maxlen=tabu_size)
+    
+    # Initialize the solution
+    current_solution = initialize_solution(net, scenario)
+    current_fitness = fitness_function(current_solution, net, target_voltage)
+    
+    for iteration in range(iterations):
+        # Get neighborhood solutions
+        neighbors = generate_neighbors(current_solution)
+        
+        # Evaluate neighbors and choose the best non-tabu solution
+        for neighbor in neighbors:
+            if neighbor not in tabu_list:
+                fitness = fitness_function(neighbor, net, target_voltage)
+                if fitness < best_fitness:
+                    best_fitness = fitness
+                    best_solution = neighbor
+                # Add current solution to tabu list
+                tabu_list.append(neighbor)
+        
+        # Move to the best solution in this iteration
+        current_solution = best_solution
+    
+    return best_solution, best_fitness
+
+def tabu_search(net, scenario, population_size=20, generations=50, target_voltage=1.0):
+    mutation_prob = 0.1
     crossover_prob = 0.8
     population = []
 
@@ -105,7 +138,7 @@ def genetic_algorithm(net, scenario, population_size=20, generations=40, target_
         
         individual = {
             'dg_locations': [np.random.randint(1, 32) for _ in range(num_dgs)],
-            'dg_sizes': [np.random.uniform(0, 0.5) for _ in range(num_dgs)],
+            'dg_sizes': [np.random.uniform(1, 10) for _ in range(num_dgs)],
             'router_target_buses': [np.random.randint(1, 32) for _ in range(num_routers)]
         }
         population.append(individual)
@@ -127,7 +160,7 @@ def genetic_algorithm(net, scenario, population_size=20, generations=40, target_
             reactive_generation = net_copy.res_bus['q_mvar'].sum()
 
             # Cost calculations
-            tic = calculate_tic([0.5] * num_routers, individual['dg_sizes'])  # Router size is fixed at 1 for now
+            tic = calculate_tic([1] * num_routers, individual['dg_sizes'])  # Router size is fixed at 1 for now
             tgc = calculate_tgc(power_losses, active_generation, reactive_generation)
             fitness = tic + tgc
         except LoadflowNotConverged:
@@ -238,14 +271,14 @@ def main():
     base_voltage_profile = net_base.res_bus['vm_pu'].values
 
     # Scenario 1: Optimize DG placement and size
-    best_dg, best_fitness_dg = genetic_algorithm(net_base, scenario=1)
+    best_dg, best_fitness_dg = tabu_search(net_base, scenario=1)
     net_dg_only = copy.deepcopy(net_base)
     add_dg_units(net_dg_only, best_dg['dg_locations'], best_dg['dg_sizes'])
     pp.runpp(net_dg_only,max_iteration=50)
     voltage_profile_dg = net_dg_only.res_bus['vm_pu'].values
 
     # Scenario 2: Optimize energy router placement
-    best_router, best_fitness_router = genetic_algorithm(net_base, scenario=2)
+    best_router, best_fitness_router = tabu_search(net_base, scenario=2)
     net_router_only = copy.deepcopy(net_base)
     for router_bus in best_router['router_target_buses']:
         add_energy_router(net_router_only, router_bus)
@@ -253,7 +286,7 @@ def main():
     voltage_profile_router = net_router_only.res_bus['vm_pu'].values
 
     # Scenario 3: Optimize both DG and energy router placement
-    best_combination, best_fitness_combination = genetic_algorithm(net_base, scenario=3)
+    best_combination, best_fitness_combination = tabu_search(net_base, scenario=3)
     net_combined = copy.deepcopy(net_base)
     add_dg_units(net_combined, best_combination['dg_locations'], best_combination['dg_sizes'])
     for router_bus in best_combination['router_target_buses']:
