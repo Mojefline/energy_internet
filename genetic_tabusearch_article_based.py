@@ -7,9 +7,15 @@ import copy
 import random
 
 min_dgs=1
-max_dgs=10
+max_dgs=20
+
 min_routers=1
-max_routers=10
+max_routers=5
+
+MAX_DG_SIZE=1
+ER_SIZE=0.5
+
+number_of_project_years = 30
 
 # Create IEEE 33-bus network
 def create_33bus_network():
@@ -24,7 +30,7 @@ def add_energy_router(net, target_bus, target_voltage=1.0):
     new_y = y + offset_distance
     new_bus = pp.create_bus(net, vn_kv=12.66, name="Energy Router Virtual Bus", geodata=[new_x, new_y])
     pp.create_transformer_from_parameters(net, hv_bus=target_bus, lv_bus=new_bus, 
-                                          sn_mva=1, vn_hv_kv=12.66, vn_lv_kv=12.66,
+                                          sn_mva=ER_SIZE, vn_hv_kv=12.66, vn_lv_kv=12.66,
                                           vsc_percent=10, vscr_percent=0.1, 
                                           pfe_kw=0, i0_percent=0, shift_degree=0,
                                           vkr_percent=0.1, vk_percent=10)
@@ -86,7 +92,7 @@ def calculate_tgc(power_losses, active_generation, reactive_generation):
     return plc + pgc + qgc
 
 # Genetic Algorithm Optimization
-def genetic_algorithm(net, scenario, population_size=20, generations=40, target_voltage=1.0):
+def genetic_algorithm(net, scenario, population_size=20, generations=50, target_voltage=1.0):
     mutation_prob = 0.3
     crossover_prob = 0.8
     population = []
@@ -105,7 +111,7 @@ def genetic_algorithm(net, scenario, population_size=20, generations=40, target_
         
         individual = {
             'dg_locations': [np.random.randint(1, 32) for _ in range(num_dgs)],
-            'dg_sizes': [np.random.uniform(0, 0.5) for _ in range(num_dgs)],
+            'dg_sizes': [np.random.uniform(0, MAX_DG_SIZE) for _ in range(num_dgs)],
             'router_target_buses': [np.random.randint(1, 32) for _ in range(num_routers)]
         }
         population.append(individual)
@@ -127,8 +133,8 @@ def genetic_algorithm(net, scenario, population_size=20, generations=40, target_
             reactive_generation = net_copy.res_bus['q_mvar'].sum()
 
             # Cost calculations
-            tic = calculate_tic([0.5] * num_routers, individual['dg_sizes'])  # Router size is fixed at 1 for now
-            tgc = calculate_tgc(power_losses, active_generation, reactive_generation)
+            tic = calculate_tic([ER_SIZE] * num_routers, individual['dg_sizes'])  # Router size is fixed at 1 for now
+            tgc = calculate_tgc(power_losses, active_generation, reactive_generation) * number_of_project_years
             fitness = tic + tgc
         except LoadflowNotConverged:
             print(f"Power flow did not converge for individual: {id}")
@@ -158,7 +164,7 @@ def genetic_algorithm(net, scenario, population_size=20, generations=40, target_
             mutation_point = np.random.randint(0, 2)
             if mutation_point == 0:  # Mutate DG locations or sizes
                 individual['dg_locations'] = [np.random.randint(1, 32) for _ in range(num_dgs)]
-                individual['dg_sizes'] = [np.random.uniform(1, 10) for _ in range(num_dgs)]
+                individual['dg_sizes'] = [np.random.uniform(1, MAX_DG_SIZE) for _ in range(num_dgs)]
             else:  # Mutate energy router locations
                 individual['router_target_buses'] = [np.random.randint(1, 32) for _ in range(num_routers)]
         return individual
@@ -219,13 +225,13 @@ def plot_network_with_devices(net, dg_locations=None, router_locations=None, tit
     if dg_locations:
         for dg_bus in dg_locations:
             x, y = net.bus_geodata.loc[dg_bus, ['x', 'y']]
-            plt.scatter(x, y, color='green', s=100, label="DG", edgecolor='black')
+            plt.scatter(x, y, color='green', s=400, label="DG", edgecolor='black')
 
     # Plot Router locations
     if router_locations:
         for router_bus in router_locations:
             x, y = net.bus_geodata.loc[router_bus, ['x', 'y']]
-            plt.scatter(x, y, color='red', s=100, label="Energy Router", edgecolor='black')
+            plt.scatter(x, y, color='red', s=400, label="Energy Router", edgecolor='black')
 
     plt.title(title)
     plt.legend()
@@ -262,10 +268,12 @@ def main():
     voltage_profile_combined = net_combined.res_bus['vm_pu'].values
 
     # Plot voltage profiles for comparison
+    # plot_voltage_profiles(base_voltage_profile, 
+    #                       [voltage_profile_dg], 
+    #                       ["DG Only"])
     plot_voltage_profiles(base_voltage_profile, 
                           [voltage_profile_dg, voltage_profile_router, voltage_profile_combined], 
                           ["DG Only", "Router Only", "DG + Router"])
-
     # Plot network configuration with devices for each scenario
     plot_network_with_devices(net_base, title="Base Network")
     plot_network_with_devices(net_dg_only, dg_locations=best_dg['dg_locations'], title="DG Optimized Network")
